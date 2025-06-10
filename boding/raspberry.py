@@ -1,51 +1,67 @@
-# File: imu_server.py (Run this on Raspberry Pi)
 
 import socket
 import smbus2
 import time
+import math
 import json
 
 # MPU6050 setup
-MPU6050_ADDR = 0x68
-PWR_MGMT_1 = 0x6B
-ACCEL_XOUT_H = 0x3B
-GYRO_XOUT_H = 0x43
-
+MPU_ADDR = 0x68
 bus = smbus2.SMBus(1)
-bus.write_byte_data(MPU6050_ADDR, PWR_MGMT_1, 0)
+bus.write_byte_data(MPU_ADDR, 0x6B, 0)  # Wake up MPU6050
 
 def read_word(reg):
-    high = bus.read_byte_data(MPU6050_ADDR, reg)
-    low = bus.read_byte_data(MPU6050_ADDR, reg + 1)
+    high = bus.read_byte_data(MPU_ADDR, reg)
+    low = bus.read_byte_data(MPU_ADDR, reg + 1)
     val = (high << 8) + low
     return val - 65536 if val > 32767 else val
+
+def get_accel():
+    ax = read_word(0x3B) / 16384.0
+    ay = read_word(0x3D) / 16384.0
+    az = read_word(0x3F) / 16384.0
+    return ax, ay, az
+
+def get_gyro():
+    gx = read_word(0x43) / 131.0
+    gy = read_word(0x45) / 131.0
+    gz = read_word(0x47) / 131.0
+    return gx, gy, gz
+
+# Complementary filter
+alpha = 0.98
+dt = 0.01
+pitch, roll = 0.0, 0.0
 
 # TCP server
 HOST = '0.0.0.0'
 PORT = 5005
-server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-server_socket.bind((HOST, PORT))
-server_socket.listen(1)
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.bind((HOST, PORT))
+s.listen(1)
 print(f"[INFO] Waiting for connection on {HOST}:{PORT}...")
-
-conn, addr = server_socket.accept()
+conn, addr = s.accept()
 print(f"[INFO] Connected by {addr}")
 
 try:
     while True:
-        data = {
-            'ax': read_word(ACCEL_XOUT_H),
-            'ay': read_word(ACCEL_XOUT_H + 2),
-            'az': read_word(ACCEL_XOUT_H + 4),
-            'gx': read_word(GYRO_XOUT_H),
-            'gy': read_word(GYRO_XOUT_H + 2),
-            'gz': read_word(GYRO_XOUT_H + 4)
-        }
-        conn.sendall((json.dumps(data) + "\n").encode())
-        time.sleep(0.05)  # ~20 Hz
+        ax, ay, az = get_accel()
+        gx, gy, gz = get_gyro()
+
+        accel_roll = math.atan2(ay, az) * 180 / math.pi
+        accel_pitch = math.atan2(-ax, math.sqrt(ay*ay + az*az)) * 180 / math.pi
+
+        roll = alpha * (roll + gx * dt) + (1 - alpha) * accel_roll
+        pitch = alpha * (pitch + gy * dt) + (1 - alpha) * accel_pitch
+
+        msg = json.dumps({"roll": roll, "pitch": pitch}) + "\n"
+        conn.sendall(msg.encode())
+        time.sleep(dt)
+
 except KeyboardInterrupt:
     print("Stopping server...")
+
 finally:
     conn.close()
-    server_socket.close()
+    s.close()
 
